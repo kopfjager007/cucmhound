@@ -12,7 +12,7 @@ sudo apt install libxml2-dev
 
 ## Usage  
 
-```bash
+```text
                             _   _                       _ 
                            | | | |                     | |
    ___ _   _  ___ _ __ ___ | |_| | ___  _   _ _ __   __| |
